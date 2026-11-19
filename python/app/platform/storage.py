@@ -60,5 +60,17 @@ class Storage:
             raise
         return int(head["ContentLength"])
 
+    async def delete_many(self, keys: list[str]) -> None:
+        """Up to 1000 keys per call (the S3 DeleteObjects limit). Missing keys count as deleted; any per-key
+        error raises, so the caller stops before touching its rows."""
+        for start in range(0, len(keys), 1000):
+            batch = [{"Key": k} for k in keys[start : start + 1000]]
+            result = await asyncio.to_thread(
+                self.client.delete_objects, Bucket=self.bucket, Delete={"Objects": batch, "Quiet": True}
+            )
+            if result.get("Errors"):
+                first = result["Errors"][0]
+                raise RuntimeError(f"bucket delete failed for {len(result['Errors'])} keys: {first.get('Code')}")
+
     async def delete(self, key: str) -> None:
         await asyncio.to_thread(self.client.delete_object, Bucket=self.bucket, Key=key)  # idempotent

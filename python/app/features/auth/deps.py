@@ -43,6 +43,7 @@ async def current_principal(
             AuthSession.user_id == claims.user_id,
             AuthSession.revoked_at.is_(None),
             AuthSession.expires_at > func.now(),
+            User.disabled_at.is_(None),  # a disabled account is locked out at once, whatever sessions remain
         )
     )
     await db.commit()  # end the read so the connection goes back to the pool (handlers may run argon2 next)
@@ -68,4 +69,5 @@ def require_role(*roles: str):
             raise ApiError(403, "forbidden", "You do not have access to this resource")
         return user
 
+    check.required_roles = frozenset(roles)  # lets tests find the guard on the real route table
     return check

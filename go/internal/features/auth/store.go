@@ -18,15 +18,19 @@ type User struct {
 	Name            string
 	Role            string
 	EmailVerifiedAt *time.Time
+	DisabledAt      *time.Time
 	CreatedAt       time.Time
 }
 
-// UserColumns matches ScanUser; callers prefix it with a table alias when joining.
-const UserColumns = "id, email, name, role, email_verified_at, created_at"
+// UserColumns matches ScanUser; userColumnsU is the same list for the alias `u` in joins.
+const (
+	UserColumns  = "id, email, name, role, email_verified_at, disabled_at, created_at"
+	userColumnsU = "u.id, u.email, u.name, u.role, u.email_verified_at, u.disabled_at, u.created_at"
+)
 
 func ScanUser(row pgx.Row) (User, error) {
 	var u User
-	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.EmailVerifiedAt, &u.CreatedAt)
+	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.EmailVerifiedAt, &u.DisabledAt, &u.CreatedAt)
 	return u, err
 }
 
@@ -36,11 +40,12 @@ type UserDTO struct {
 	Name          string    `json:"name"`
 	Role          string    `json:"role"`
 	EmailVerified bool      `json:"email_verified"`
+	Disabled      bool      `json:"disabled"`
 	CreatedAt     time.Time `json:"created_at"`
 }
 
 func (u User) DTO() UserDTO {
-	return UserDTO{ID: u.ID, Email: u.Email, Name: u.Name, Role: u.Role, EmailVerified: u.EmailVerifiedAt != nil, CreatedAt: u.CreatedAt.UTC()}
+	return UserDTO{ID: u.ID, Email: u.Email, Name: u.Name, Role: u.Role, EmailVerified: u.EmailVerifiedAt != nil, Disabled: u.DisabledAt != nil, CreatedAt: u.CreatedAt.UTC()}
 }
 
 const (
@@ -64,7 +69,7 @@ func userWithHashByEmail(ctx context.Context, q db.DBTX, email string) (User, st
 	var u User
 	var hash string
 	err := q.QueryRow(ctx, `SELECT `+UserColumns+`, password_hash FROM auth.users WHERE email = $1`, email).
-		Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.EmailVerifiedAt, &u.CreatedAt, &hash)
+		Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.EmailVerifiedAt, &u.DisabledAt, &u.CreatedAt, &hash)
 	return u, hash, err
 }
 
@@ -96,7 +101,7 @@ func insertSession(ctx context.Context, q db.DBTX, userID uuid.UUID, verifiedHas
 	var id uuid.UUID
 	err := q.QueryRow(ctx,
 		`INSERT INTO auth.sessions (user_id, refresh_token_hash, user_agent, ip, expires_at)
-		 SELECT id, $2, $3, $4, now() + make_interval(secs => $5) FROM auth.users WHERE id = $1 AND password_hash = $6
+		 SELECT id, $2, $3, $4, now() + make_interval(secs => $5) FROM auth.users WHERE id = $1 AND password_hash = $6 AND disabled_at IS NULL
 		 FOR SHARE
 		 RETURNING id`,
 		userID, tokenHash, userAgent, ip, secs(ttl), verifiedHash).Scan(&id)
@@ -110,9 +115,10 @@ func rotateSession(ctx context.Context, q db.DBTX, sid uuid.UUID, oldHash, newHa
 		   UPDATE auth.sessions SET refresh_token_hash = $3, previous_refresh_token_hash = $2,
 		     last_used_at = now(), expires_at = now() + make_interval(secs => $4)
 		   WHERE id = $1 AND refresh_token_hash = $2 AND revoked_at IS NULL AND expires_at > now()
+		     AND EXISTS (SELECT 1 FROM auth.users WHERE id = sessions.user_id AND disabled_at IS NULL)
 		   RETURNING user_id
 		 )
-		 SELECT u.id, u.email, u.name, u.role, u.email_verified_at, u.created_at FROM auth.users u JOIN s ON u.id = s.user_id`,
+		 SELECT `+userColumnsU+` FROM auth.users u JOIN s ON u.id = s.user_id`,
 		sid, oldHash, newHash, secs(ttl)))
 }
 
@@ -149,12 +155,13 @@ func revokeUserSessions(ctx context.Context, q db.DBTX, userID, keep uuid.UUID) 
 	return err
 }
 
-// sessionUser is the guard's one query: live session + its user.
+// sessionUser is the guard's one query: live session + its (not disabled) user.
 func sessionUser(ctx context.Context, q db.DBTX, sid, userID uuid.UUID) (User, error) {
 	return ScanUser(q.QueryRow(ctx,
-		`SELECT u.id, u.email, u.name, u.role, u.email_verified_at, u.created_at
+		`SELECT `+userColumnsU+`
 		 FROM auth.sessions s JOIN auth.users u ON u.id = s.user_id
-		 WHERE s.id = $1 AND s.user_id = $2 AND s.revoked_at IS NULL AND s.expires_at > now()`,
+		 WHERE s.id = $1 AND s.user_id = $2 AND s.revoked_at IS NULL AND s.expires_at > now()
+		   AND u.disabled_at IS NULL`,
 		sid, userID))
 }
 
@@ -184,10 +191,12 @@ func listActiveSessions(ctx context.Context, q db.DBTX, userID uuid.UUID) ([]ses
 // ---------- one-time tokens ----------
 
 // userForToken is a plain read (no row lock): issuance must only lock via lockTokenIssue.
+// Disabled accounts are invisible here, so they never get verification or reset mail.
 func userForToken(ctx context.Context, q db.DBTX, email string) (uuid.UUID, bool, error) {
 	var id uuid.UUID
 	var verifiedAt *time.Time
-	err := q.QueryRow(ctx, `SELECT id, email_verified_at FROM auth.users WHERE email = $1`, email).Scan(&id, &verifiedAt)
+	err := q.QueryRow(ctx, `SELECT id, email_verified_at FROM auth.users WHERE email = $1 AND disabled_at IS NULL`, email).
+		Scan(&id, &verifiedAt)
 	return id, verifiedAt != nil, err
 }
 

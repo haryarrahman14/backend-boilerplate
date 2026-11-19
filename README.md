@@ -24,7 +24,7 @@ flowchart LR
 
 | | |
 |---|---|
-| **Auth** | email + password, argon2id, 15-min JWT, rotating refresh token, server-side sessions, email verification, password reset, roles |
+| **Auth** | email + password, argon2id, 15-min JWT, rotating refresh token, server-side sessions, email verification, password reset, roles, account deletion, admin suspend / delete |
 | **Storage** | direct-to-bucket uploads with presigned URLs (Cloudflare R2 / any S3) |
 | **Platform** | validated config, SQL migrations, one error format, request ids, JSON logs, rate limit, health, OpenAPI, Dockerfile |
 | **Parity** | same endpoints, env and schema in all four, enforced by [`contract/`](contract/contract.test.mjs) |
@@ -42,7 +42,7 @@ make contract                   # repo root: the suite against all four
 
 | Decision | Because |
 |---|---|
-| JWT is checked against the session row on **every request** | logout, password reset and role changes apply immediately, not after 15 minutes |
+| JWT is checked against the session row on **every request** | logout, password reset, role changes, suspension and deletion apply immediately, not after 15 minutes |
 | Refresh token is opaque, rotated on every use, stored as SHA-256 | a database leak yields no usable token |
 | Reuse detection compares against the **previous** hash only | the session id is public (JWT `sid`); a guessed secret must not log a user out |
 | Login inserts the session with `INSERT … SELECT … FOR SHARE` on the verified hash | a login in flight cannot outlive a concurrent password reset |
@@ -114,6 +114,7 @@ flowchart LR
 | `POST /auth/logout-all` · password reset | every session |
 | password change | every other session |
 | a replayed refresh token | that session |
+| admin disables or deletes the user · user deletes own account | every session |
 
 ### Login → call → refresh
 
@@ -254,7 +255,18 @@ Base `/api/v1` · JSON · `snake_case` · 🔒 = `Authorization: Bearer <access_
 |---|---|---|---|---|
 | GET | `/users/me` 🔒 | | 200 `{user}` | 401 |
 | PATCH | `/users/me` 🔒 | `name` | 200 `{user}` | 422 |
+| DELETE | `/users/me` 🔒 | `password` | 204 | 401 `invalid_credentials` |
 | GET | `/admin/users` 🔒 admin | `page` `per_page` | 200 list | 403 `forbidden` |
+| PATCH | `/admin/users/{id}` 🔒 admin | `role` `disabled` | 200 `{user}` | 403 · 404 · 422 |
+| DELETE | `/admin/users/{id}` 🔒 admin | | 204 | 403 · 404 |
+
+| Action | Effect |
+|---|---|
+| `disabled: true` | every session revoked, login answers 403 `account_disabled`, data kept |
+| `disabled: false` | account can log in again |
+| delete | sessions, tokens, file rows and bucket objects removed; the email can register again |
+
+An admin cannot change, disable or delete their own account through `/admin`.
 
 Promote: `UPDATE auth.users SET role='admin' WHERE email='…'`
 
@@ -289,7 +301,7 @@ Promote: `UPDATE auth.users SET role='admin' WHERE email='…'`
 
 ```jsonc
 // user
-{ "id": "uuid", "email": "a@b.co", "name": "Ada", "role": "user|admin", "email_verified": false, "created_at": "2026-01-02T03:04:05Z" }
+{ "id": "uuid", "email": "a@b.co", "name": "Ada", "role": "user|admin", "email_verified": false, "disabled": false, "created_at": "2026-01-02T03:04:05Z" }
 // tokens
 { "access_token": "jwt", "refresh_token": "<session_id>.<secret>", "token_type": "Bearer", "expires_in": 900, "user": {} }
 // file
@@ -313,7 +325,7 @@ Promote: `UPDATE auth.users SET role='admin' WHERE email='…'`
 |---|---|
 | 400 | `bad_request` · `invalid_token` |
 | 401 | `invalid_credentials` · `unauthorized` |
-| 403 | `email_not_verified` · `forbidden` |
+| 403 | `email_not_verified` · `account_disabled` · `forbidden` |
 | 404 | `not_found` |
 | 409 | `email_taken` · `upload_incomplete` |
 | 413 | `payload_too_large` (1 MB) |
@@ -331,11 +343,11 @@ Promote: `UPDATE auth.users SET role='admin' WHERE email='…'`
 
 | Schema | Tables | Migrations |
 |---|---|---|
-| `auth` | `users` · `sessions` · `user_tokens` | goose · sqlx · Alembic · Prisma, one initial migration each |
+| `auth` | `users` · `sessions` · `user_tokens` | goose · sqlx · Alembic · Prisma |
 | `storage` | `files` | |
 | `public` | yours | |
 
-Deleting a user cascades to sessions, tokens and file rows. Bucket objects stay.
+Deleting a user through the API removes sessions, tokens, file rows and bucket objects. A raw `DELETE FROM auth.users` cascades the rows but leaves bucket objects.
 
 ---
 
@@ -389,6 +401,6 @@ R2 bucket CORS: allow `PUT` with `Content-Type` from your frontend origin.
 
 ## Not included
 
-OAuth · 2FA · email change · cookie auth · admin write endpoints · distributed rate limiter · file quota
+OAuth · 2FA · email change · cookie auth · teams / organisations · fine-grained permissions · distributed rate limiter · file quota
 
 Full rules: [SPEC.md](SPEC.md)

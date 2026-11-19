@@ -26,11 +26,13 @@ All variables and defaults are in SPEC section 2 and `.env.example`. The process
 
 ## Database
 
-`make migrate` applies one embedded migration that creates the schemas `auth` (users, sessions, user_tokens) and `storage` (files). `public` stays empty for the application on top, apart from sqlx's `_sqlx_migrations`. All SQL in the code is schema-qualified; nothing depends on `search_path`. There is no seed command; promote an admin with:
+`make migrate` applies the embedded migrations: the initial one creates the schemas `auth` (users, sessions, user_tokens) and `storage` (files); later ones only add (the first adds `auth.users.disabled_at`). Never edit a migration that has been pushed; add a new one. `public` stays empty for the application on top, apart from sqlx's `_sqlx_migrations`. All SQL in the code is schema-qualified; nothing depends on `search_path`. There is no seed command; promote an admin with:
 
 ```sql
 UPDATE auth.users SET role = 'admin' WHERE email = 'you@example.com';
 ```
+
+After that, admins manage accounts through the API: `PATCH /api/v1/admin/users/{id}` (`role`, `disabled`; disabling revokes every session) and `DELETE /api/v1/admin/users/{id}`. Users delete themselves with `DELETE /api/v1/users/me` (`{ "password" }`). Deletion revokes sessions first, then deletes the user's bucket objects, then the row (a bucket failure is a 500 and the call can be repeated). An upload URL issued before the deletion can still leave an orphan object for up to 15 minutes; add a bucket lifecycle rule on `users/` to clean those up.
 
 ## Outside the shared contract
 
@@ -46,7 +48,7 @@ UPDATE auth.users SET role = 'admin' WHERE email = 'you@example.com';
 src/main.rs              CLI (serve | migrate), router, HTTP server, graceful shutdown
 src/features/
   auth/                  routes, handlers, service (flows), repo (SQL), dto, guard (AuthUser), crypto
-  users/                 /users/me, /admin/users
+  users/                 /users/me (get, patch, delete), /admin/users (list, patch, delete)
   files/                 presign / complete / list / get / delete against S3
   health/                /health, /health/ready
   mod.rs                 OpenAPI document (utoipa)

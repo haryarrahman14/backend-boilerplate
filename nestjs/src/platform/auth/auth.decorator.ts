@@ -12,6 +12,7 @@ export interface AuthContext {
     name: string;
     role: Role;
     emailVerifiedAt: Date | null;
+    disabledAt: Date | null; // always null here: the guard rejects disabled accounts
     createdAt: Date;
   };
 }

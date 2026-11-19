@@ -53,13 +53,14 @@ export class JwtAuthGuard implements CanActivate {
     const rows = await this.prisma.$queryRaw<SessionUserRow[]>`
       SELECT u.id, u.email, u.name, u.role, u.email_verified_at, u.created_at
       FROM auth.sessions s JOIN auth.users u ON u.id = s.user_id
-      WHERE s.id = ${sid}::uuid AND s.user_id = ${sub}::uuid AND s.revoked_at IS NULL AND s.expires_at > now()`;
+      WHERE s.id = ${sid}::uuid AND s.user_id = ${sub}::uuid AND s.revoked_at IS NULL AND s.expires_at > now()
+        AND u.disabled_at IS NULL`;
     const row = rows[0];
     if (!row) throw ApiError.unauthorized();
 
     const auth: AuthContext = {
       sessionId: sid,
-      user: { id: row.id, email: row.email, name: row.name, role: row.role, emailVerifiedAt: row.email_verified_at, createdAt: row.created_at },
+      user: { id: row.id, email: row.email, name: row.name, role: row.role, emailVerifiedAt: row.email_verified_at, disabledAt: null, createdAt: row.created_at },
     };
     req.auth = auth;
     const ctx = requestContext.getStore();

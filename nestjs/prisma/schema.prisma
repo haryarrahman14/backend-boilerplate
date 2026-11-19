@@ -19,6 +19,8 @@ model User {
   name            String
   role            String    @default("user")
   emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz
+  /// null = active; set by an admin (PATCH /admin/users/{id} { disabled: true }).
+  disabledAt      DateTime? @map("disabled_at") @db.Timestamptz
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
   updatedAt       DateTime  @default(now()) @map("updated_at") @db.Timestamptz
 

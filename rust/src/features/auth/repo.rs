@@ -36,7 +36,7 @@ pub async fn create_session(
     let res = sqlx::query(
         "INSERT INTO auth.sessions (id, user_id, refresh_token_hash, user_agent, ip, expires_at) \
          SELECT $1, u.id, $3, $4, $5, now() + $6::bigint * interval '1 second' \
-         FROM auth.users u WHERE u.id = $2 AND u.password_hash = $7 FOR SHARE",
+         FROM auth.users u WHERE u.id = $2 AND u.password_hash = $7 AND u.disabled_at IS NULL FOR SHARE",
     )
     .bind(s.id)
     .bind(s.user_id)
@@ -64,6 +64,7 @@ pub async fn rotate_refresh(
         "UPDATE auth.sessions SET refresh_token_hash = $3, previous_refresh_token_hash = $2, ",
         "last_used_at = now(), expires_at = now() + $4::bigint * interval '1 second' ",
         "WHERE id = $1 AND refresh_token_hash = $2 AND revoked_at IS NULL AND expires_at > now() ",
+        "AND EXISTS (SELECT 1 FROM auth.users d WHERE d.id = auth.sessions.user_id AND d.disabled_at IS NULL) ",
         "RETURNING user_id) ",
         "SELECT ",
         user_columns!("u"),

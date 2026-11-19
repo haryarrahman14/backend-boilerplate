@@ -1,9 +1,9 @@
 import re
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, StringConstraints
+from pydantic import AfterValidator, BaseModel, StrictBool, StringConstraints
 
 from app.features.users.models import User
 from app.platform.pagination import PageMeta
@@ -43,6 +43,7 @@ class UserOut(BaseModel):
     name: str
     role: str
     email_verified: bool
+    disabled: bool
     created_at: datetime
 
     @classmethod
@@ -53,6 +54,7 @@ class UserOut(BaseModel):
             name=user.name,
             role=user.role,
             email_verified=user.email_verified_at is not None,
+            disabled=user.disabled_at is not None,
             created_at=user.created_at,
         )
 
@@ -63,6 +65,17 @@ class UserResponse(BaseModel):
 
 class UpdateMeRequest(RequestBody):
     name: Name | None = None  # only `name` is writable; role/email in the body are ignored
+
+
+class DeleteMeRequest(RequestBody):
+    password: Annotated[str, StringConstraints(min_length=1)]  # presence only, like login
+
+
+class AdminUpdateRequest(RequestBody):
+    """Both optional; absent (or null) leaves the value as it is."""
+
+    role: Literal["user", "admin"] | None = None
+    disabled: StrictBool | None = None  # exactly true / false
 
 
 class UserPage(BaseModel):

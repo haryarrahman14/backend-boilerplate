@@ -11,6 +11,7 @@ import { PrismaService } from '../../platform/prisma/prisma.service.js';
 import { EMAIL_REGEX } from '../../platform/validation/validation.decorator.js';
 import { UserDto } from '../users/dto/user.dto.js';
 import type { SessionDto, TokensDto } from './dto/auth-response.dto.js';
+import { loginDecision } from './login-decision.js';
 import { getDummyHash, hashPassword, verifyPassword } from './password.js';
 import { formatRefreshToken, generateSecret, isReplayOfRotatedToken, parseRefreshToken, sha256Hex } from './tokens.js';
 
@@ -75,9 +76,16 @@ export class AuthService implements OnModuleInit {
       await verifyPassword(await getDummyHash(), password); // same cost as a real check: no enumeration by timing
       throw ApiError.invalidCredentials();
     }
-    if (!(await verifyPassword(user.passwordHash, password))) throw ApiError.invalidCredentials();
-    // Only after the password matched, so this 403 never reveals anything to someone without the password.
-    if (this.requireVerified && !user.emailVerifiedAt) throw ApiError.emailNotVerified();
+    // 403s (disabled / unverified) only after the password matched, so they reveal nothing without it.
+    const outcome = loginDecision({
+      passwordOk: await verifyPassword(user.passwordHash, password),
+      disabled: user.disabledAt !== null,
+      emailVerified: user.emailVerifiedAt !== null,
+      requireVerifiedEmail: this.requireVerified,
+    });
+    if (outcome === 'invalid_credentials') throw ApiError.invalidCredentials();
+    if (outcome === 'account_disabled') throw ApiError.accountDisabled();
+    if (outcome === 'email_not_verified') throw ApiError.emailNotVerified();
 
     const sessionId = randomUUID();
     const secret = generateSecret();
@@ -90,7 +98,7 @@ export class AuthService implements OnModuleInit {
       INSERT INTO auth.sessions (id, user_id, refresh_token_hash, user_agent, ip, expires_at)
       SELECT ${sessionId}::uuid, u.id, ${sha256Hex(secret)}, ${userAgent}, ${client.ip},
              now() + ${this.refreshTtl}::int * interval '1 second'
-      FROM auth.users u WHERE u.id = ${user.id}::uuid AND u.password_hash = ${user.passwordHash}
+      FROM auth.users u WHERE u.id = ${user.id}::uuid AND u.password_hash = ${user.passwordHash} AND u.disabled_at IS NULL
       FOR SHARE`;
     if (inserted === 0) throw ApiError.invalidCredentials();
     return this.tokens(UserDto.from(user), sessionId, secret);
@@ -128,7 +136,8 @@ export class AuthService implements OnModuleInit {
     }
 
     const user = await this.prisma.user.findUnique({ where: { id: rotated[0].user_id }, omit: { passwordHash: true } });
-    if (!user) throw ApiError.unauthorized();
+    // Disabling revokes every session, so this is belt and braces against a disable racing the rotation.
+    if (!user || user.disabledAt) throw ApiError.unauthorized();
     return this.tokens(UserDto.from(user), sessionId, newSecret);
   }
 
@@ -193,8 +202,8 @@ export class AuthService implements OnModuleInit {
   /** Always resolves; the lookup and the mail happen in the background so timing reveals nothing. */
   resendVerification(email: string): void {
     this.mailer.sendInBackground('email verification', async () => {
-      const user = await this.prisma.user.findUnique({ where: { email }, select: { id: true, email: true, emailVerifiedAt: true } });
-      if (!user || user.emailVerifiedAt) return null;
+      const user = await this.prisma.user.findUnique({ where: { email }, select: { id: true, email: true, emailVerifiedAt: true, disabledAt: true } });
+      if (!user || user.emailVerifiedAt || user.disabledAt) return null; // disabled: no mail, same 202
       return this.verificationMail(user.id, user.email);
     });
   }
@@ -214,8 +223,8 @@ export class AuthService implements OnModuleInit {
   /** Always resolves; same reasoning as resendVerification. */
   forgotPassword(email: string): void {
     this.mailer.sendInBackground('password reset', async () => {
-      const user = await this.prisma.user.findUnique({ where: { email }, select: { id: true, email: true } });
-      if (!user) return null;
+      const user = await this.prisma.user.findUnique({ where: { email }, select: { id: true, email: true, disabledAt: true } });
+      if (!user || user.disabledAt) return null; // disabled: no mail, same 202
       const token = await this.issueToken(user.id, 'password_reset', RESET_TTL_SECONDS);
       if (!token) return null; // cooldown: nothing issued, nothing sent
       return {

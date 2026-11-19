@@ -45,6 +45,12 @@ models; nothing relies on `search_path`. There is no seed command; promote an ad
 UPDATE auth.users SET role = 'admin' WHERE email = 'you@example.com';
 ```
 
+After that, admins manage users over the API: `PATCH /api/v1/admin/users/{id}` (`role`, `disabled`) and
+`DELETE /api/v1/admin/users/{id}`. An admin cannot demote, disable or delete themselves there. Disabling
+revokes every session at once. Deleting a user (also `DELETE /users/me` with the password) revokes sessions,
+removes the user's bucket objects, then the row. A bucket failure gives 500 and the call can be repeated. An
+upload URL issued just before can still leave an orphan object, so give the bucket a lifecycle rule on `users/`.
+
 ## Layout
 
 ```
@@ -54,13 +60,15 @@ app/
   features/
     auth/               router, service (register/login/refresh/sessions/tokens), security (argon2, JWT,
                         opaque tokens), deps (auth guard: session + user in one query), models, schemas
-    users/              /users/me, /admin/users, User model, shared field rules (email, name, password)
+    users/              router: /users/me (incl. delete); admin_router: /admin/* (list, update, delete),
+                        admin-only at the router level; service (deletion, disable, self-change rule),
+                        User model, shared field rules (email, name, password)
     files/              presign / complete / list / get / delete against S3 (R2 or MinIO)
     health/             /health, /health/ready
   platform/             config, db, errors (envelope), middleware (incl. client IP), logs (JSON), mailer,
                         storage, ratelimit, pagination, validation (body base, path ids), tasks (background
                         email, capped), cpu (bounded argon2 pool), docs (pinned Swagger UI)
-migrations/             alembic: one initial revision creating schemas auth + storage and their tables
+migrations/             alembic: 0001 schemas auth + storage and their tables, 0002 auth.users.disabled_at
 tests/                  unit tests: tokens, passwords, JWT, rate limiter, config, client IP, email syntax,
                         path ids, middleware
 ```

@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.features.auth.router import router as auth_router
 from app.features.files.router import router as files_router
 from app.features.health.router import router as health_router
+from app.features.users.admin_router import admin_router
 from app.features.users.router import router as users_router
 from app.platform import tasks
 from app.platform.config import Settings
@@ -52,7 +53,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.mailer = Mailer(settings)
 
     install_error_handlers(app)
-    for router in (auth_router, users_router, files_router):
+    for router in (auth_router, users_router, admin_router, files_router):
         app.include_router(router, prefix="/api/v1")
     app.include_router(health_router)
     if not settings.is_production:

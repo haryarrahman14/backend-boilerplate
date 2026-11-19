@@ -23,5 +23,6 @@ class User(Base):
     name: Mapped[str] = mapped_column(Text)
     role: Mapped[str] = mapped_column(Text, server_default=text("'user'"))
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # null = active; set by an admin
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

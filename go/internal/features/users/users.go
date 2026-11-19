@@ -1,4 +1,4 @@
-// Package users serves the profile and admin user list.
+// Package users serves the profile, account deletion and admin user management.
 package users
 
 import (
@@ -11,18 +11,32 @@ import (
 
 	"boilerplate/internal/features/auth"
 	"boilerplate/internal/platform/httpx"
+	"boilerplate/internal/platform/storage"
 )
 
-type Handler struct{ pool *pgxpool.Pool }
+type Handler struct {
+	pool  *pgxpool.Pool
+	store *storage.Storage
+	auth  *auth.Service
+}
 
-func New(pool *pgxpool.Pool) *Handler { return &Handler{pool: pool} }
+func New(pool *pgxpool.Pool, store *storage.Storage, authSvc *auth.Service) *Handler {
+	return &Handler{pool: pool, store: store, auth: authSvc}
+}
 
-func (h *Handler) Routes(r chi.Router, require func(http.Handler) http.Handler) {
+func (h *Handler) Routes(r chi.Router) {
 	r.Group(func(r chi.Router) {
-		r.Use(require)
+		r.Use(h.auth.Require)
 		r.Get("/users/me", httpx.Handle(h.me))
 		r.Patch("/users/me", httpx.Handle(h.updateMe))
-		r.With(auth.RequireRole("admin")).Get("/admin/users", httpx.Handle(h.list))
+		r.Delete("/users/me", httpx.Handle(h.deleteMe))
+		// Role check runs as middleware, before any id parsing or body validation (SPEC 5).
+		r.Route("/admin/users", func(r chi.Router) {
+			r.Use(auth.RequireRole("admin"))
+			r.Get("/", httpx.Handle(h.list))
+			r.Patch("/{id}", httpx.Handle(h.adminUpdate))
+			r.Delete("/{id}", httpx.Handle(h.adminDelete))
+		})
 	})
 }
 

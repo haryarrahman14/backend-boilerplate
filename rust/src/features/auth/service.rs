@@ -76,9 +76,11 @@ pub async fn login(
         Some(u) if valid => u,
         _ => return Err(AppError::InvalidCredentials),
     };
-    if state.config.require_verified_email && user.email_verified_at.is_none() {
-        return Err(AppError::EmailNotVerified);
-    }
+    after_password_verified(
+        user.disabled_at.is_some(),
+        state.config.require_verified_email,
+        user.email_verified_at.is_some(),
+    )?;
 
     let session_id = Uuid::new_v4();
     let (refresh_token, refresh_hash) = crypto::new_refresh_token(session_id);
@@ -143,6 +145,7 @@ pub fn resend_verification(state: &AppState, email: String) {
     mailer.spawn_job("resend verification", async move {
         if let Some(user) = users::find_by_email(&state.db, &email).await?
             && user.email_verified_at.is_none()
+            && user.disabled_at.is_none()
         {
             let mut tx = state.db.begin().await?;
             let token = new_one_time_token(
@@ -168,7 +171,10 @@ pub fn forgot_password(state: &AppState, email: String) {
     let state = state.clone();
     let mailer = state.mailer.clone();
     mailer.spawn_job("forgot password", async move {
-        if let Some(user) = users::find_by_email(&state.db, &email).await? {
+        // A disabled account gets no recovery mail; the public answer stays 202.
+        if let Some(user) = users::find_by_email(&state.db, &email).await?
+            && user.disabled_at.is_none()
+        {
             let mut tx = state.db.begin().await?;
             let token =
                 new_one_time_token(&state, &mut tx, user.id, PASSWORD_RESET, RESET_TTL_SECONDS)
@@ -286,4 +292,43 @@ fn reset_mail(state: &AppState, token: &str) -> (&'static str, String) {
              If it was not you, ignore this email; your password stays the same."
         ),
     )
+}
+
+/// What login answers once the password is known to be right. Only then may the account state
+/// show (a wrong password is always 401, so these statuses are no enumeration oracle).
+pub fn after_password_verified(
+    disabled: bool,
+    require_verified: bool,
+    verified: bool,
+) -> AppResult<()> {
+    if disabled {
+        return Err(AppError::AccountDisabled);
+    }
+    if require_verified && !verified {
+        return Err(AppError::EmailNotVerified);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_wins_after_the_password_verified() {
+        assert!(after_password_verified(false, false, false).is_ok());
+        assert!(after_password_verified(false, true, true).is_ok());
+        assert!(matches!(
+            after_password_verified(true, false, true),
+            Err(AppError::AccountDisabled)
+        ));
+        assert!(matches!(
+            after_password_verified(true, true, false),
+            Err(AppError::AccountDisabled)
+        ));
+        assert!(matches!(
+            after_password_verified(false, true, false),
+            Err(AppError::EmailNotVerified)
+        ));
+    }
 }

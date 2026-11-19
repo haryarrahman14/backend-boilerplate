@@ -31,6 +31,15 @@ query is schema-qualified, nothing relies on `search_path`. `public` holds only 
 UPDATE auth.users SET role = 'admin' WHERE email = 'you@example.com';
 ```
 
+Later admins are managed over the API: `PATCH /api/v1/admin/users/{id}` (`role`, `disabled`) and
+`DELETE /api/v1/admin/users/{id}`; an admin cannot demote, disable or delete themselves there.
+Disabling revokes every session at once; a disabled account gets `403 account_disabled` on login
+(only after the right password) and no verification or reset mail. Deleting an account
+(`DELETE /api/v1/users/me` with the password, or the admin route) revokes sessions first, deletes
+the user's bucket objects, then the user row (cascade). A bucket failure returns 500 and the call
+can be repeated. Ceiling: an upload URL issued before the deletion can still create an orphan
+object for up to 15 minutes; add a bucket lifecycle rule on `users/` to clean those up.
+
 ## Env
 
 All vars and defaults are in SPEC section 2 and `.env.example`. Config is validated once at
@@ -57,10 +66,10 @@ most 4x that many waiters, beyond which requests get 429 with `Retry-After: 1`.
 ```
 cmd/api/main.go            wiring, `migrate` subcommand, graceful shutdown
 migrations/                goose SQL, embedded in the binary: schemas auth (users, sessions,
-                           user_tokens) and storage (files); public stays empty for your app
+                           user_tokens) and storage (files); 00002 adds users.disabled_at
 internal/features/
   auth/                    routes, guard, service, queries, argon2/JWT/token helpers (+ tests)
-  users/                   /users/me, /admin/users
+  users/                   /users/me (get, patch, delete), /admin/users (list, patch, delete) (+ tests)
   files/                   presign / complete / list / get / delete
   health/                  /health, /health/ready, /openapi.json (embedded), /docs
 internal/platform/

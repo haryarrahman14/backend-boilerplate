@@ -13,6 +13,7 @@ pub struct User {
     pub name: String,
     pub role: String,
     pub email_verified_at: Option<DateTime<Utc>>,
+    pub disabled_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -25,6 +26,7 @@ impl std::fmt::Debug for User {
             .field("name", &self.name)
             .field("role", &self.role)
             .field("email_verified_at", &self.email_verified_at)
+            .field("disabled_at", &self.disabled_at)
             .field("created_at", &self.created_at)
             .finish()
     }
@@ -47,6 +49,8 @@ macro_rules! user_columns {
             ".role, ",
             $p,
             ".email_verified_at, ",
+            $p,
+            ".disabled_at, ",
             $p,
             ".created_at"
         )
@@ -140,4 +144,46 @@ pub async fn mark_verified(db: impl PgExecutor<'_>, id: Uuid) -> sqlx::Result<()
     .execute(db)
     .await?;
     Ok(())
+}
+
+pub async fn find_by_id(db: impl PgExecutor<'_>, id: Uuid) -> sqlx::Result<Option<User>> {
+    sqlx::query_as(concat!(
+        "SELECT ",
+        user_columns!("u"),
+        " FROM auth.users u WHERE u.id = $1"
+    ))
+    .bind(id)
+    .fetch_optional(db)
+    .await
+}
+
+pub async fn set_role(db: impl PgExecutor<'_>, id: Uuid, role: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE auth.users SET role = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(role)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Disabling keeps the first `disabled_at`; enabling clears it.
+pub async fn set_disabled(db: impl PgExecutor<'_>, id: Uuid, disabled: bool) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE auth.users SET disabled_at = CASE WHEN $2 THEN COALESCE(disabled_at, now()) END, \
+         updated_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(disabled)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Removes the user; sessions, tokens and file rows go with it (ON DELETE CASCADE).
+pub async fn delete(db: impl PgExecutor<'_>, id: Uuid) -> sqlx::Result<bool> {
+    let res = sqlx::query("DELETE FROM auth.users WHERE id = $1")
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(res.rows_affected() > 0)
 }

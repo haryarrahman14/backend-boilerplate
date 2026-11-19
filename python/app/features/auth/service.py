@@ -78,6 +78,11 @@ async def _verify(password_hash: str, password: str) -> bool:
     return await _argon2(verify_password, password_hash, password)
 
 
+async def check_password(password_hash: str, password: str) -> bool:
+    """argon2 verify with the login rules (bounded pool, nothing over 128 code points), for other features."""
+    return await _verify(password_hash, password)
+
+
 def _tokens(settings: Settings, user: User, session_id: uuid.UUID, secret: str) -> TokensResponse:
     return TokensResponse(
         access_token=encode_access_token(
@@ -165,6 +170,16 @@ def _reset_mail(settings: Settings, token: str) -> tuple[str, str]:
 # ---------- register / login / refresh ----------
 
 
+def login_refusal(user: User, require_verified_email: bool) -> ApiError | None:
+    """What a login whose password DID verify is still refused with. Only ever asked after the verify, so a
+    403 never tells someone without the password that the account exists or is disabled."""
+    if user.disabled_at is not None:
+        return ApiError(403, "account_disabled", "This account has been disabled")
+    if require_verified_email and user.email_verified_at is None:
+        return ApiError(403, "email_not_verified", "Verify your email address before logging in")
+    return None
+
+
 async def register(db: AsyncSession, email: str, password: str, name: str) -> User:
     """Creates the user only; the verification token is issued and mailed in the background, like a resend."""
     password_hash = await _hash(password)  # before touching the DB: no connection held during argon2
@@ -194,8 +209,9 @@ async def login(
     verified_hash = user.password_hash
     if not await _verify(verified_hash, password):
         raise _invalid_credentials()
-    if settings.auth_require_verified_email and user.email_verified_at is None:  # only after the password verified
-        raise ApiError(403, "email_not_verified", "Verify your email address before logging in")
+    refusal = login_refusal(user, settings.auth_require_verified_email)  # only after the password verified
+    if refusal is not None:
+        raise refusal
     if needs_rehash(verified_hash):  # argon2 parameters changed since this hash was made
         new_hash = await _hash(password)
         swapped = await db.scalar(  # compare-and-swap first, then bind the session to the hash now stored
@@ -224,7 +240,7 @@ async def login(
                 literal(ip, Text),
                 func.now() + timedelta(seconds=settings.refresh_token_ttl_seconds),
             )
-            .where(User.id == user.id, User.password_hash == verified_hash)
+            .where(User.id == user.id, User.password_hash == verified_hash, User.disabled_at.is_(None))
             .with_for_update(read=True),
         )
         .returning(AuthSession.id)
@@ -250,6 +266,8 @@ async def refresh(db: AsyncSession, settings: Settings, refresh_token: str) -> T
             AuthSession.refresh_token_hash == old_hash,
             AuthSession.revoked_at.is_(None),
             AuthSession.expires_at > func.now(),
+            # Disabling revokes every session anyway; this also covers a refresh racing the disable.
+            exists().where(User.id == AuthSession.user_id, User.disabled_at.is_(None)),
         )
         .values(
             refresh_token_hash=sha256_hex(new),
@@ -368,7 +386,7 @@ async def send_verification_if_unverified(
     async with sessionmaker() as db:
         user = await db.scalar(select(User).where(User.email == email))
         await db.commit()  # the issuing transaction starts with the advisory lock
-        if user is None or user.email_verified_at is not None:
+        if user is None or user.email_verified_at is not None or user.disabled_at is not None:
             return
         token = await _issue_token(db, user.id, EMAIL_VERIFICATION, VERIFY_TTL, settings.email_token_cooldown_seconds)
         await db.commit()
@@ -384,7 +402,7 @@ async def send_reset_if_exists(
     async with sessionmaker() as db:
         user = await db.scalar(select(User).where(User.email == email))
         await db.commit()  # the issuing transaction starts with the advisory lock
-        if user is None:
+        if user is None or user.disabled_at is not None:  # a disabled account gets no recovery mail
             return
         token = await _issue_token(db, user.id, PASSWORD_RESET, RESET_TTL, settings.email_token_cooldown_seconds)
         await db.commit()

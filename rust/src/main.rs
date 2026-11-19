@@ -166,7 +166,7 @@ fn app(state: AppState) -> Result<Router> {
 
     let api = Router::new()
         .nest("/auth", auth::router(&state))
-        .merge(users::router())
+        .merge(users::router(&state))
         .merge(files::router());
 
     let mut router = Router::new().merge(health::router()).nest("/api/v1", api);
@@ -225,5 +225,159 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {},
         () = term => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use sqlx::postgres::PgPoolOptions;
+    use uuid::Uuid;
+
+    use super::*;
+
+    const LOCAL_DB: &str = "postgres://postgres:postgres@localhost:5433/boilerplate_rust";
+
+    fn test_state(db_url: &str) -> AppState {
+        let config = Config::from_lookup(|name| {
+            let v = match name {
+                "DATABASE_URL" => db_url,
+                "JWT_SECRET" => "unit-test-secret-0123456789abcdef-xyz",
+                "S3_ENDPOINT" => "http://localhost:9000",
+                "S3_ACCESS_KEY_ID" | "S3_SECRET_ACCESS_KEY" => "test",
+                "S3_BUCKET" => "test",
+                _ => return None,
+            };
+            Some(v.to_owned())
+        })
+        .unwrap();
+        // Lazy: nothing connects until a query runs.
+        let pool = PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(2))
+            .connect_lazy(db_url)
+            .unwrap();
+        AppState::new(config, pool).unwrap()
+    }
+
+    /// Every operation under /api/v1/admin, read from the generated OpenAPI document so a new
+    /// admin route is covered without touching this test.
+    fn admin_operations() -> Vec<(Method, String)> {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let mut ops = Vec::new();
+        for (path, item) in doc["paths"].as_object().unwrap() {
+            if !path.starts_with("/api/v1/admin") {
+                continue;
+            }
+            let concrete = path
+                .split('/')
+                .map(|seg| {
+                    if seg.starts_with('{') {
+                        Uuid::new_v4().to_string()
+                    } else {
+                        seg.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            for method in item.as_object().unwrap().keys() {
+                if let Ok(m) = method.to_uppercase().parse::<Method>() {
+                    ops.push((m, concrete.clone()));
+                }
+            }
+        }
+        ops
+    }
+
+    async fn call(
+        app: &Router,
+        method: &Method,
+        path: &str,
+        token: Option<&str>,
+    ) -> (StatusCode, String) {
+        let mut req = Request::builder()
+            .method(method.clone())
+            .uri(path)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        let res = app
+            .clone()
+            .oneshot(req.body(Body::from("{}")).unwrap())
+            .await
+            .unwrap();
+        let status = res.status();
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let code = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        (status, code)
+    }
+
+    #[tokio::test]
+    async fn every_admin_route_is_admin_only() {
+        let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| LOCAL_DB.to_owned());
+        let state = test_state(&db_url);
+        let app = app(state.clone()).unwrap();
+        let ops = admin_operations();
+        assert!(
+            ops.len() >= 3,
+            "no admin routes found in the OpenAPI document: {ops:?}"
+        );
+
+        for (method, path) in &ops {
+            let got = call(&app, method, path, None).await;
+            assert_eq!(
+                got,
+                (StatusCode::UNAUTHORIZED, "unauthorized".into()),
+                "{method} {path} without a token"
+            );
+        }
+
+        // A real non-admin session needs the (migrated) database; without one this half is skipped.
+        let Ok(Ok(_)) = tokio::time::timeout(Duration::from_secs(2), state.db.acquire()).await
+        else {
+            eprintln!("skipping the non-admin half: no database at {db_url}");
+            return;
+        };
+        let email = format!("admin-guard-{}@example.com", Uuid::new_v4());
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO auth.users (email, password_hash, name) VALUES ($1, 'x', 'Guard test') RETURNING id",
+        )
+        .bind(&email)
+        .fetch_one(&state.db)
+        .await
+        .expect("insert test user (run `make migrate` first)");
+        let session_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO auth.sessions (id, user_id, refresh_token_hash, expires_at) \
+             VALUES ($1, $2, 'x', now() + interval '5 minutes')",
+        )
+        .bind(session_id)
+        .bind(user_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let token = state.jwt.issue(user_id, session_id).unwrap();
+
+        let mut failures = Vec::new();
+        for (method, path) in &ops {
+            let got = call(&app, method, path, Some(&token)).await;
+            if got != (StatusCode::FORBIDDEN, "forbidden".into()) {
+                failures.push(format!("{method} {path} as a non-admin gave {got:?}"));
+            }
+        }
+        sqlx::query("DELETE FROM auth.users WHERE id = $1")
+            .bind(user_id)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 }

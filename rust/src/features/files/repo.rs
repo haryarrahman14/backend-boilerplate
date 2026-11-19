@@ -110,3 +110,21 @@ pub async fn list(
         .await?;
     Ok((rows, total))
 }
+
+/// Object keys of the user's files, in id order after `after` (keyset paging for account deletion).
+pub async fn keys_after(
+    db: impl PgExecutor<'_>,
+    user_id: Uuid,
+    after: Option<Uuid>,
+    limit: i64,
+) -> sqlx::Result<Vec<(Uuid, String)>> {
+    sqlx::query_as(
+        "SELECT id, key FROM storage.files WHERE user_id = $1 AND ($2::uuid IS NULL OR id > $2) \
+         ORDER BY id LIMIT $3",
+    )
+    .bind(user_id)
+    .bind(after)
+    .bind(limit)
+    .fetch_all(db)
+    .await
+}

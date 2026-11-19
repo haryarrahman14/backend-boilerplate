@@ -6,6 +6,7 @@ interface UserRow {
   name: string;
   role: string;
   emailVerifiedAt: Date | null;
+  disabledAt: Date | null;
   createdAt: Date;
 }
 
@@ -17,6 +18,8 @@ export class UserDto {
   /** @example user */
   role: Role;
   email_verified: boolean;
+  /** True while an admin has disabled the account. */
+  disabled: boolean;
   created_at: Date;
 
   static from(u: UserRow): UserDto {
@@ -26,6 +29,7 @@ export class UserDto {
       name: u.name,
       role: u.role as Role, // DB CHECK constraint guarantees 'user' | 'admin'
       email_verified: u.emailVerifiedAt !== null,
+      disabled: u.disabledAt !== null,
       created_at: u.createdAt,
     };
   }

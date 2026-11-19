@@ -1,12 +1,14 @@
-from fastapi import APIRouter, Depends
-from sqlalchemy import func, select, update
+"""The signed-in user's own account. Admin routes live in admin_router.py, guarded at the router level."""
 
-from app.features.auth.deps import CurrentUser, require_role
+from fastapi import APIRouter, Request, Response
+from sqlalchemy import func, update
+
+from app.features.auth.deps import CurrentUser
+from app.features.users import service
 from app.features.users.models import User
-from app.features.users.schemas import UpdateMeRequest, UserOut, UserPage, UserResponse
+from app.features.users.schemas import DeleteMeRequest, UpdateMeRequest, UserOut, UserResponse
 from app.platform.db import Db
 from app.platform.errors import ERROR_RESPONSES
-from app.platform.pagination import PageMeta, Pagination
 
 router = APIRouter(tags=["users"], responses=ERROR_RESPONSES)
 
@@ -30,12 +32,6 @@ async def update_me(body: UpdateMeRequest, user: CurrentUser, db: Db) -> UserRes
     return UserResponse(user=UserOut.of(user))
 
 
-@router.get("/admin/users", response_model=UserPage, dependencies=[Depends(require_role("admin"))])
-async def list_users(page: Pagination, db: Db) -> UserPage:
-    total = await db.scalar(select(func.count()).select_from(User))
-    users = await db.scalars(
-        select(User).order_by(User.created_at.desc(), User.id).offset(page.offset).limit(page.per_page)
-    )
-    return UserPage(
-        data=[UserOut.of(u) for u in users], meta=PageMeta(page=page.page, per_page=page.per_page, total=total)
-    )
+@router.delete("/users/me", status_code=204, response_class=Response)
+async def delete_me(body: DeleteMeRequest, request: Request, user: CurrentUser, db: Db) -> None:
+    await service.delete_me(db, request.app.state.storage, user, body.password)

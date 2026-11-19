@@ -14,6 +14,7 @@ pub struct UserDto {
     #[schema(example = "user")]
     pub role: String,
     pub email_verified: bool,
+    pub disabled: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -25,6 +26,7 @@ impl From<User> for UserDto {
             name: u.name,
             role: u.role,
             email_verified: u.email_verified_at.is_some(),
+            disabled: u.disabled_at.is_some(),
             created_at: u.created_at,
         }
     }
@@ -46,4 +48,19 @@ impl From<User> for UserResponse {
 pub struct UpdateMeRequest {
     #[schema(example = "Grace Hopper")]
     pub name: Option<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct DeleteMeRequest {
+    /// The current password, as confirmation.
+    #[schema(value_type = String)]
+    pub password: Option<String>,
+}
+
+/// Both fields optional; an empty body changes nothing.
+#[derive(Deserialize, ToSchema)]
+pub struct AdminUpdateUserRequest {
+    #[schema(value_type = Option<String>, example = "admin")]
+    pub role: Option<String>,
+    pub disabled: Option<bool>,
 }

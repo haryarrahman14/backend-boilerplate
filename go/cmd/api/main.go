@@ -92,7 +92,7 @@ func serve(log *slog.Logger) error {
 	health.Routes(r, pool, !cfg.Production())
 	r.Route("/api/v1", func(r chi.Router) {
 		authSvc.Routes(r, ratelimit.New(cfg.RateLimitAuthPerMinute, time.Minute).Middleware)
-		users.New(pool).Routes(r, authSvc.Require)
+		users.New(pool, store, authSvc).Routes(r)
 		files.New(cfg, pool, store).Routes(r, authSvc.Require)
 	})
 

@@ -20,6 +20,7 @@ use utoipa::{
         auth::handlers::reset_password, auth::handlers::change_password,
         auth::handlers::list_sessions, auth::handlers::delete_session,
         users::handlers::me, users::handlers::update_me, users::handlers::list_users,
+        users::handlers::delete_me, users::handlers::admin_update_user, users::handlers::admin_delete_user,
         files::handlers::presign, files::handlers::complete, files::handlers::list,
         files::handlers::get_one, files::handlers::delete,
     ),

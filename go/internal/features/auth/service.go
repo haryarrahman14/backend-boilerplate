@@ -30,6 +30,7 @@ var (
 	errInvalidToken       = httpx.NewError(http.StatusBadRequest, "invalid_token", "The link is invalid or has expired.")
 	errEmailTaken         = httpx.NewError(http.StatusConflict, "email_taken", "An account with this email already exists.")
 	errEmailNotVerified   = httpx.NewError(http.StatusForbidden, "email_not_verified", "Verify your email address before logging in.")
+	errAccountDisabled    = httpx.NewError(http.StatusForbidden, "account_disabled", "This account has been disabled.")
 )
 
 // Background email jobs run on a small fixed worker pool fed by a bounded queue, so a
@@ -173,6 +174,45 @@ func (s *Service) verifyDummy(ctx context.Context, password string) error {
 	return err
 }
 
+// loginGate decides, for a user whose password has ALREADY been verified, whether login may
+// proceed. It is only reached after argon2 succeeded, so neither 403 can probe for accounts.
+// Disabled wins over unverified: an admin's decision outranks a missing email confirmation.
+func loginGate(u User, requireVerified bool) error {
+	switch {
+	case u.DisabledAt != nil:
+		return errAccountDisabled
+	case requireVerified && u.EmailVerifiedAt == nil:
+		return errEmailNotVerified
+	}
+	return nil
+}
+
+// CheckPassword verifies a user's current password under the login argon2 rules (slot bound,
+// nothing over 128 code points is hashed). A mismatch is 401 invalid_credentials.
+func (s *Service) CheckPassword(ctx context.Context, userID uuid.UUID, password string) error {
+	if tooLong(password) {
+		if err := s.verifyDummy(ctx, password); err != nil {
+			return err
+		}
+		return errWrongPassword
+	}
+	hash, err := passwordHash(ctx, s.pool, userID)
+	if isNoRows(err) {
+		return httpx.Unauthorized() // deleted while the request ran
+	}
+	if err != nil {
+		return err
+	}
+	ok, err := VerifyPassword(ctx, hash, password)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errWrongPassword
+	}
+	return nil
+}
+
 func tooLong(password string) bool { return utf8.RuneCountInString(password) > 128 }
 
 func (s *Service) Login(ctx context.Context, email, password, userAgent, ip string) (Tokens, error) {
@@ -201,9 +241,8 @@ func (s *Service) Login(ctx context.Context, email, password, userAgent, ip stri
 	if !ok {
 		return Tokens{}, errInvalidCredentials
 	}
-	// Checked only after the password, so it cannot be used to probe for accounts.
-	if s.cfg.AuthRequireVerifiedEmail && u.EmailVerifiedAt == nil {
-		return Tokens{}, errEmailNotVerified
+	if err := loginGate(u, s.cfg.AuthRequireVerifiedEmail); err != nil {
+		return Tokens{}, err
 	}
 
 	secret, err := NewSecret()

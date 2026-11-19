@@ -35,7 +35,7 @@ src/
   features/
     auth/                    register, login, refresh, logout, verify/reset/change password, sessions
       tokens.ts, password.ts pure security helpers (unit tested)
-    users/                   /users/me and /admin/users
+    users/                   /users/me (incl. DELETE), /admin/users (list, PATCH role/disabled, DELETE)
     files/                   presign, complete, list, get, delete
     health/                  /health and /health/ready
   platform/                  shared, feature-agnostic pieces
@@ -46,7 +46,7 @@ prisma/                      schema.prisma + one SQL migration (SPEC section 3: 
 ```
 
 Notes:
-- Tables live in the `auth` and `storage` Postgres schemas; `public` is left to the application built on top (only Prisma's `_prisma_migrations` sits there). Raw SQL always names the schema, never relies on `search_path`. Promote an admin with `UPDATE auth.users SET role = 'admin' WHERE email = '…';`
+- Tables live in the `auth` and `storage` Postgres schemas; `public` is left to the application built on top (only Prisma's `_prisma_migrations` sits there). Raw SQL always names the schema, never relies on `search_path`. Promote the first admin with `UPDATE auth.users SET role = 'admin' WHERE email = '…';`; after that admins manage roles through `PATCH /admin/users/{id}`.
 - Routes are authenticated by default; public ones carry `@Public()`. The guard loads session and user in one SQL query on every request, so revocation is immediate and the role comes from the DB.
 - Request pipeline (`main.ts`): request id + headers + log line, CORS, the `/auth/*` rate limiter, JSON-only check, 1 MB body parser (413 `payload_too_large`), object-body check (422), then Nest's guards, validation pipe and routes. The limiter sits before body parsing so malformed and oversized requests count too.
 - The auth rate limiter is in memory, so it holds per instance only (swap it for Redis before running more than one). It keys IPv6 by /64 and tracks at most 100 000 keys (new keys beyond that are allowed, untracked).
@@ -55,5 +55,7 @@ Notes:
 - Password writes (`auth.service.ts`): login inserts its session only if the verified hash is still current (`... FOR SHARE`), change-password is a compare-and-swap on the verified hash and a live session and leaves reset links alone, reset burns every other reset link and revokes all sessions. Lock order is `user_tokens` → `users` → `sessions`; argon2 never runs inside a transaction and is bounded by a queue (CPU-count slots, 4× waiters, then 429 `Retry-After: 1`).
 - Refresh reuse detection revokes a session only when the presented secret equals `auth.sessions.previous_refresh_token_hash`; an invented secret is a plain 401.
 - One-time tokens: issuing keeps older links valid (serialised per user with `pg_advisory_xact_lock`, `EMAIL_TOKEN_COOLDOWN_SECONDS`); consuming one burns the user's other tokens of that type. Mails contain fixed text plus the link only.
+- Admin user management: `PATCH /admin/users/{id}` sets `role` and/or `disabled` (disabling revokes every session in the same transaction; a disabled account gets 403 `account_disabled` at login only after the password verified, is refused by the guard and refresh, and gets no mail). Admins cannot change their own role, disable or delete themselves there (403). RolesGuard runs before pipes, so non-admins get 403 before any id or body validation.
+- Deleting an account (`DELETE /users/me` with the password, or `DELETE /admin/users/{id}`): revoke sessions (committed first), delete the user's bucket objects page by page (a bucket error is a 500 and the call can be repeated), then delete the user row, which cascades. An upload URL issued earlier can still leave an orphan object for 15 minutes; a bucket lifecycle rule on `users/` should clean those.
 - Uploads: the presigned PUT signs `Content-Type` and `Content-Length`, so the bucket refuses any other length; downloads are presigned with a bare `Content-Disposition: attachment`.
 - Nest 12 generates projects with Vitest and oxlint; this one keeps Jest and ESLint, as agreed for the boilerplate. Jest runs in ESM mode (`--experimental-vm-modules`), and the unit tests import only framework-free modules.

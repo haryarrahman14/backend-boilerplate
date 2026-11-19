@@ -23,6 +23,7 @@ If an implementation and this file disagree, this file wins.
 | 401 | `invalid_credentials` | login failed (any reason), wrong current password |
 | 401 | `unauthorized` | missing/invalid/expired access token, revoked session, bad refresh token |
 | 403 | `email_not_verified` | login while `AUTH_REQUIRE_VERIFIED_EMAIL=true` and not verified |
+| 403 | `account_disabled` | login to a disabled account, returned only after the password was verified |
 | 403 | `forbidden` | role not allowed |
 | 404 | `not_found` | unknown route, **known path with an unsupported method** (no 405), or unknown resource (also: resource owned by someone else) |
 | 409 | `email_taken` | register with existing email |
@@ -78,7 +79,7 @@ Tables live in two Postgres schemas, never in `public` — `public` is left for 
 | `auth` | `users`, `sessions`, `user_tokens` |
 | `storage` | `files` |
 
-One initial migration creates both schemas and every table inside them. Every statement is schema-qualified (`auth.users`); nothing relies on `search_path`. Only the migration tool's own bookkeeping table stays in `public`.
+The initial migration creates both schemas and every table inside them; later changes are new migrations (the first one is `users.disabled_at`). Every statement is schema-qualified (`auth.users`); nothing relies on `search_path`. Only the migration tool's own bookkeeping table stays in `public`.
 
 ```sql
 auth.users(
@@ -88,6 +89,7 @@ auth.users(
   name text not null,
   role text not null default 'user' check (role in ('user','admin')),
   email_verified_at timestamptz,
+  disabled_at timestamptz,               -- null = active; set by an admin (added by a second migration)
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 )
@@ -174,7 +176,7 @@ storage.files(
 
 ## 5. Endpoints
 
-`user` object everywhere: `{ "id", "email", "name", "role", "email_verified": bool, "created_at" }`.
+`user` object everywhere: `{ "id", "email", "name", "role", "email_verified": bool, "disabled": bool, "created_at" }`.
 `tokens` response: `{ "access_token", "refresh_token", "token_type": "Bearer", "expires_in": 900, "user": {user} }`.
 🔒 = requires access token. Rate limited = everything under `/auth`.
 
@@ -204,8 +206,28 @@ Password reset / change and token consumption + side effects happen in **one DB 
 ### Users
 - `GET /users/me` 🔒 → 200 `{ "user" }`
 - `PATCH /users/me` 🔒 `{ name }` → 200 `{ "user" }`. `name` absent → 200, nothing changes.
+- `DELETE /users/me` 🔒 `{ password }` → 204. Wrong password → 401 `invalid_credentials` (argon2 rules as for login). Deletes the account: see **Deleting a user** below.
 - `GET /admin/users` 🔒 role `admin` → paginated list of `user`. Others → 403 `forbidden`, checked **before** query validation (a non-admin never sees 422).
   (No seed command: promote with `UPDATE auth.users SET role='admin' WHERE email='…'`.)
+
+### Admin user management — all 🔒 role `admin`, 403 `forbidden` for everyone else (checked before any validation)
+
+| route | body | success | notes |
+|---|---|---|---|
+| `PATCH /admin/users/{id}` | `role?` (`user`\|`admin`), `disabled?` (bool) | 200 `{ "user" }` | No fields → 200, nothing changes. Unknown or non-UUID id → 404. Invalid value → 422. **An admin cannot change their own role or disable themselves → 403 `forbidden`** (so an admin cannot lock the system out by accident). Only an actual change is refused: sending one's own current values is a no-op and returns 200. `null` for a field counts as absent. |
+| `DELETE /admin/users/{id}` | – | 204 | Deletes the account (below). Own id → 403 `forbidden` (use `DELETE /users/me`). Unknown or non-UUID id → 404. |
+
+**Disabling** sets `disabled_at = now()` and revokes every session of that user, in one transaction. Enabling sets it to null. A disabled account:
+- cannot log in: 403 `account_disabled` (it takes precedence over `email_not_verified`), but only after the password verified (a wrong password is still 401, so the status is not an enumeration oracle);
+- is rejected by the auth guard (the session + user query also requires `disabled_at IS NULL`) and by refresh → 401 `unauthorized`;
+- gets no verification or reset mail (the anonymous endpoints still answer 202).
+Role changes need no session change: the guard reads the role from the database on every request.
+
+**Deleting a user** (`DELETE /users/me` and `DELETE /admin/users/{id}`), in this order:
+1. revoke every session of the user (committed first, so access stops even if a later step fails);
+2. delete every bucket object under the user's files; if the bucket fails, stop with 500 — the user row is still there and the call can be repeated;
+3. delete the `users` row; sessions, tokens and file rows go with it (`ON DELETE CASCADE`).
+The email address is free to register again afterwards. An upload URL issued before the deletion can still create an object for up to 15 minutes; that orphan is accepted (comment the ceiling: a bucket lifecycle rule on `users/` cleans it up).
 
 ### Files (R2 / S3, direct-to-bucket uploads) — all 🔒, scoped to the owner
 `file` object: `{ "id", "filename", "content_type", "size", "status", "created_at", "uploaded_at" }`.

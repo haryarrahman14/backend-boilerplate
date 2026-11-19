@@ -27,6 +27,8 @@ services:
 
   mailpit:
     image: axllent/mailpit
+    environment:
+      MP_MAX_MESSAGES: 5000   # default 500 is reached within a few contract runs; pruning then races the tests
     ports: ["127.0.0.1:1025:1025", "127.0.0.1:8025:8025"]
 
 volumes:

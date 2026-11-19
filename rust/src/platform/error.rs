@@ -42,6 +42,7 @@ pub enum AppError {
     InvalidCredentials,
     Unauthorized,
     EmailNotVerified,
+    AccountDisabled,
     Forbidden,
     NotFound,
     EmailTaken,
@@ -90,6 +91,11 @@ impl IntoResponse for AppError {
                 StatusCode::FORBIDDEN,
                 "email_not_verified",
                 "email address is not verified",
+            ),
+            AppError::AccountDisabled => (
+                StatusCode::FORBIDDEN,
+                "account_disabled",
+                "this account is disabled",
             ),
             AppError::Forbidden => (
                 StatusCode::FORBIDDEN,

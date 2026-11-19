@@ -1,5 +1,6 @@
 import {
   DeleteObjectCommand,
+  DeleteObjectsCommand,
   GetObjectCommand,
   HeadObjectCommand,
   NotFound,
@@ -69,5 +70,16 @@ export class StorageService {
 
   async delete(key: string): Promise<void> {
     await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+  }
+
+  /** Batch delete (S3 allows 1000 keys per call). Throws if the bucket reports any key it could not delete. */
+  async deleteMany(keys: string[]): Promise<void> {
+    if (keys.length === 0) return;
+    if (keys.length > 1000) throw new Error('deleteMany takes at most 1000 keys');
+    const res = await this.s3.send(
+      new DeleteObjectsCommand({ Bucket: this.bucket, Delete: { Objects: keys.map((Key) => ({ Key })), Quiet: true } }),
+    );
+    const failed = (res.Errors ?? []).filter((e) => e.Code !== 'NoSuchKey');
+    if (failed.length > 0) throw new Error(`bucket refused to delete ${failed.length} object(s): ${failed[0].Code ?? 'unknown'}`);
   }
 }

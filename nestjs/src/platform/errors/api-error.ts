@@ -29,7 +29,8 @@ export class ApiError extends HttpException {
   static invalidCredentials = () => new ApiError(HttpStatus.UNAUTHORIZED, 'invalid_credentials', 'Invalid email or password');
   static unauthorized = () => new ApiError(HttpStatus.UNAUTHORIZED, 'unauthorized', 'Authentication required');
   static emailNotVerified = () => new ApiError(HttpStatus.FORBIDDEN, 'email_not_verified', 'Email address is not verified');
-  static forbidden = () => new ApiError(HttpStatus.FORBIDDEN, 'forbidden', 'You are not allowed to do this');
+  static accountDisabled = () => new ApiError(HttpStatus.FORBIDDEN, 'account_disabled', 'This account has been disabled');
+  static forbidden = (message = 'You are not allowed to do this') => new ApiError(HttpStatus.FORBIDDEN, 'forbidden', message);
   static notFound = (message = 'Not found') => new ApiError(HttpStatus.NOT_FOUND, 'not_found', message);
   static emailTaken = () => new ApiError(HttpStatus.CONFLICT, 'email_taken', 'Email is already registered');
   static uploadIncomplete = () => new ApiError(HttpStatus.CONFLICT, 'upload_incomplete', 'The object has not been uploaded yet');

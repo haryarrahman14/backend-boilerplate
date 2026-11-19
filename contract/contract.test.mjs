@@ -88,6 +88,7 @@ test('tables live in auth and storage, not in public', { skip: !DATABASE_URL && 
   const leftovers = q("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('users','sessions','user_tokens','files')");
   assert.deepEqual(leftovers, [], `boilerplate tables still in public: ${leftovers}`);
   assert.deepEqual(q("SELECT column_name FROM information_schema.columns WHERE table_schema='auth' AND table_name='sessions' AND column_name='previous_refresh_token_hash'"), ['previous_refresh_token_hash']);
+  assert.deepEqual(q("SELECT column_name FROM information_schema.columns WHERE table_schema='auth' AND table_name='users' AND column_name='disabled_at'"), ['disabled_at']);
 });
 
 test('health, readiness, docs', async () => {
@@ -103,6 +104,8 @@ test('health, readiness, docs', async () => {
   for (const p of ['/api/v1/auth/login', '/api/v1/auth/refresh', '/api/v1/users/me', '/api/v1/files/presign']) {
     assert.ok(spec.json.paths[p], `openapi is missing ${p}`);
   }
+  assert.ok(Object.keys(spec.json.paths).some((p) => p.startsWith('/api/v1/admin/users/{')), 'openapi is missing the admin user routes');
+  assert.ok(spec.json.paths['/api/v1/users/me'].delete, 'openapi is missing DELETE /users/me');
   assert.equal((await fetch(`${BASE}/docs`)).status, 200);
 });
 
@@ -125,7 +128,7 @@ test('unknown route and malformed json use the error envelope', async () => {
   expectError(await call('POST', '/auth/login', { raw: '{"email":' }), 400, 'bad_request');
   // known path, unsupported method -> 404 (the contract has no 405)
   expectError(await call('GET', '/auth/login'), 404, 'not_found');
-  expectError(await call('DELETE', '/users/me'), 404, 'not_found');
+  expectError(await call('PUT', '/users/me'), 404, 'not_found');
   // body without a JSON content type
   const noType = await fetch(`${API}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{"email":"a@b.co","password":"x"}' });
   assert.equal(noType.status, 400);
@@ -186,7 +189,8 @@ test('register normalises email, hides the hash, rejects duplicates', async () =
   assert.equal(u.email_verified, false);
   assert.match(u.id, /^[0-9a-f-]{36}$/);
   assert.ok(!Number.isNaN(Date.parse(u.created_at)));
-  assert.deepEqual(Object.keys(u).sort(), ['created_at', 'email', 'email_verified', 'id', 'name', 'role']);
+  assert.deepEqual(Object.keys(u).sort(), ['created_at', 'disabled', 'email', 'email_verified', 'id', 'name', 'role']);
+  assert.equal(u.disabled, false);
   assert.equal(res.json.access_token, undefined, 'register returns no tokens');
   expectError(await call('POST', '/auth/register', { body: { email, password: PASSWORD, name: 'Dup' } }), 409, 'email_taken');
   // login is case-insensitive too
@@ -544,6 +548,145 @@ test('admin route: forbidden for users, role read from DB on every request', { s
   for (const q of ['page=0', 'per_page=101', 'per_page=0', 'page=abc', 'page=1.5', 'page=2147483648', 'page=99999999999999999999']) {
     expectError(await call('GET', `/admin/users?${q}`, { token: t.access_token }), 422, 'validation_error');
   }
+});
+
+// ---------- account deletion and admin user management ----------
+
+const UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+async function admin() {
+  const t = await signedUp();
+  assert.match(t.user.id, UUID);
+  execFileSync('psql', [DATABASE_URL, '-qc', `UPDATE auth.users SET role='admin' WHERE id='${t.user.id}'`]);
+  return t;
+}
+async function uploadedFile(token) {
+  const bytes = Buffer.from(`delete-me-${run}`);
+  const pre = await call('POST', '/files/presign', { token, body: { filename: 'x.png', content_type: 'image/png', size: bytes.length } });
+  assert.equal(pre.status, 201, pre.text);
+  assert.equal((await fetch(pre.json.upload.url, { method: 'PUT', headers: pre.json.upload.headers, body: bytes })).status, 200);
+  assert.equal((await call('POST', `/files/${pre.json.file.id}/complete`, { token })).status, 200);
+  const got = await call('GET', `/files/${pre.json.file.id}`, { token });
+  assert.equal((await fetch(got.json.download_url)).status, 200);
+  return got.json.download_url;
+}
+
+test('delete own account: needs the password, removes sessions, files and bucket objects, frees the email', async () => {
+  const { email } = await register();
+  const here = await login(email);
+  const elsewhere = await login(email);
+  const downloadUrl = await uploadedFile(here.access_token);
+
+  expectError(await call('DELETE', '/users/me', { body: { password: PASSWORD } }), 401, 'unauthorized');
+  expectError(await call('DELETE', '/users/me', { token: here.access_token, body: {} }), 422, 'validation_error');
+  expectError(await call('DELETE', '/users/me', { token: here.access_token, body: { password: 'not the right password' } }), 401, 'invalid_credentials');
+  assert.equal((await call('GET', '/users/me', { token: here.access_token })).status, 200, 'a wrong password deletes nothing');
+
+  const del = await call('DELETE', '/users/me', { token: here.access_token, body: { password: PASSWORD } });
+  assert.equal(del.status, 204, del.text);
+  expectError(await call('GET', '/users/me', { token: here.access_token }), 401, 'unauthorized');
+  expectError(await call('GET', '/users/me', { token: elsewhere.access_token }), 401, 'unauthorized');
+  expectError(await call('POST', '/auth/refresh', { body: { refresh_token: elsewhere.refresh_token } }), 401, 'unauthorized');
+  expectError(await call('POST', '/auth/login', { body: { email, password: PASSWORD } }), 401, 'invalid_credentials');
+  assert.notEqual((await fetch(downloadUrl)).status, 200, 'bucket object must be gone');
+  // the address is free again, and the new account starts empty
+  const again = await call('POST', '/auth/register', { body: { email, password: PASSWORD, name: 'Second life' } });
+  assert.equal(again.status, 201, again.text);
+  const fresh = await login(email);
+  assert.equal((await call('GET', '/files', { token: fresh.access_token })).json.meta.total, 0);
+});
+
+test('admin routes are admin only, before any validation', { skip: !DATABASE_URL && 'DATABASE_URL not set' }, async () => {
+  const user = await signedUp();
+  const other = await signedUp();
+  for (const [method, path, body] of [
+    ['PATCH', `/admin/users/${other.user.id}`, { disabled: true }],
+    ['PATCH', `/admin/users/${other.user.id}`, { role: 'nonsense' }],
+    ['PATCH', '/admin/users/not-a-uuid', { disabled: true }],
+    ['DELETE', `/admin/users/${other.user.id}`, undefined],
+  ]) {
+    expectError(await call(method, path, { token: user.access_token, body }), 403, 'forbidden');
+    expectError(await call(method, path, { body }), 401, 'unauthorized');
+  }
+  assert.equal((await call('GET', '/users/me', { token: other.access_token })).status, 200);
+});
+
+test('admin can disable and re-enable an account; access stops at once', { skip: !DATABASE_URL && 'DATABASE_URL not set' }, async () => {
+  const boss = await admin();
+  const { email, user } = await register();
+  const session = await login(email);
+
+  const off = await call('PATCH', `/admin/users/${user.id}`, { token: boss.access_token, body: { disabled: true } });
+  assert.equal(off.status, 200, off.text);
+  assert.equal(off.json.user.disabled, true);
+  assert.equal(off.json.user.id, user.id);
+
+  expectError(await call('GET', '/users/me', { token: session.access_token }), 401, 'unauthorized');
+  expectError(await call('POST', '/auth/refresh', { body: { refresh_token: session.refresh_token } }), 401, 'unauthorized');
+  // the status is only revealed to someone who knows the password
+  expectError(await call('POST', '/auth/login', { body: { email, password: 'not the right password' } }), 401, 'invalid_credentials');
+  expectError(await call('POST', '/auth/login', { body: { email, password: PASSWORD } }), 403, 'account_disabled');
+  // no recovery mail for a disabled account, same public answer
+  const before = await mailCount(email);
+  assert.equal((await call('POST', '/auth/forgot-password', { body: { email } })).status, 202);
+  await new Promise((r) => setTimeout(r, 600));
+  assert.equal(await mailCount(email), before);
+
+  const list = await call('GET', '/admin/users?per_page=100', { token: boss.access_token });
+  assert.equal(list.json.data.find((u) => u.id === user.id)?.disabled, true);
+
+  const on = await call('PATCH', `/admin/users/${user.id}`, { token: boss.access_token, body: { disabled: false } });
+  assert.equal(on.status, 200, on.text);
+  assert.equal(on.json.user.disabled, false);
+  expectError(await call('GET', '/users/me', { token: session.access_token }), 401, 'unauthorized'); // old sessions stay revoked
+  await login(email);
+});
+
+test('admin can change roles; it applies on the next request; admins cannot change themselves', { skip: !DATABASE_URL && 'DATABASE_URL not set' }, async () => {
+  const boss = await admin();
+  const t = await signedUp();
+  expectError(await call('GET', '/admin/users', { token: t.access_token }), 403, 'forbidden');
+
+  const up = await call('PATCH', `/admin/users/${t.user.id}`, { token: boss.access_token, body: { role: 'admin' } });
+  assert.equal(up.status, 200, up.text);
+  assert.equal(up.json.user.role, 'admin');
+  assert.equal((await call('GET', '/admin/users', { token: t.access_token })).status, 200, 'same access token, no re-login');
+  const down = await call('PATCH', `/admin/users/${t.user.id}`, { token: boss.access_token, body: { role: 'user' } });
+  assert.equal(down.json.user.role, 'user');
+  expectError(await call('GET', '/admin/users', { token: t.access_token }), 403, 'forbidden');
+
+  const noop = await call('PATCH', `/admin/users/${t.user.id}`, { token: boss.access_token, body: {} });
+  assert.equal(noop.status, 200);
+  assert.deepEqual(noop.json.user, down.json.user);
+  for (const body of [{ role: 'superuser' }, { disabled: 'yes' }, { role: 5 }]) {
+    expectError(await call('PATCH', `/admin/users/${t.user.id}`, { token: boss.access_token, body }), 422, 'validation_error');
+  }
+  expectError(await call('PATCH', `/admin/users/${randomUUID()}`, { token: boss.access_token, body: { disabled: true } }), 404, 'not_found');
+  expectError(await call('PATCH', '/admin/users/not-a-uuid', { token: boss.access_token, body: { disabled: true } }), 404, 'not_found');
+  // an admin cannot lock themselves out
+  expectError(await call('PATCH', `/admin/users/${boss.user.id}`, { token: boss.access_token, body: { role: 'user' } }), 403, 'forbidden');
+  expectError(await call('PATCH', `/admin/users/${boss.user.id}`, { token: boss.access_token, body: { disabled: true } }), 403, 'forbidden');
+  expectError(await call('DELETE', `/admin/users/${boss.user.id}`, { token: boss.access_token }), 403, 'forbidden');
+  // ...but sending their own current values is a no-op, not an error
+  assert.equal((await call('PATCH', `/admin/users/${boss.user.id}`, { token: boss.access_token, body: { role: 'admin', disabled: false } })).status, 200);
+  assert.equal((await call('PATCH', `/admin/users/${t.user.id}`, { token: boss.access_token, body: { role: null, disabled: null } })).status, 200);
+  assert.equal((await call('GET', '/admin/users', { token: boss.access_token })).status, 200);
+});
+
+test('admin can delete a user: access, files and bucket objects are gone', { skip: !DATABASE_URL && 'DATABASE_URL not set' }, async () => {
+  const boss = await admin();
+  const { email, user } = await register();
+  const session = await login(email);
+  const downloadUrl = await uploadedFile(session.access_token);
+
+  assert.equal((await call('DELETE', `/admin/users/${user.id}`, { token: boss.access_token })).status, 204);
+  expectError(await call('GET', '/users/me', { token: session.access_token }), 401, 'unauthorized');
+  expectError(await call('POST', '/auth/refresh', { body: { refresh_token: session.refresh_token } }), 401, 'unauthorized');
+  expectError(await call('POST', '/auth/login', { body: { email, password: PASSWORD } }), 401, 'invalid_credentials');
+  assert.notEqual((await fetch(downloadUrl)).status, 200, 'bucket object must be gone');
+  expectError(await call('DELETE', `/admin/users/${user.id}`, { token: boss.access_token }), 404, 'not_found');
+  expectError(await call('DELETE', '/admin/users/not-a-uuid', { token: boss.access_token }), 404, 'not_found');
+  const list = await call('GET', '/admin/users?per_page=100', { token: boss.access_token });
+  assert.ok(!list.json.data.some((u) => u.id === user.id));
 });
 
 // ---------- files ----------

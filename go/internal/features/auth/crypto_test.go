@@ -188,3 +188,31 @@ func TestReuseDetected(t *testing.T) {
 		t.Fatal("revoked/expired sessions are left alone")
 	}
 }
+
+func TestLoginGate(t *testing.T) {
+	now := time.Now()
+	active := User{EmailVerifiedAt: &now}
+	unverified := User{}
+	disabled := User{EmailVerifiedAt: &now, DisabledAt: &now}
+	disabledUnverified := User{DisabledAt: &now}
+	cases := []struct {
+		name    string
+		u       User
+		require bool
+		want    error
+	}{
+		{"active", active, true, nil},
+		{"unverified, not required", unverified, false, nil},
+		{"unverified, required", unverified, true, errEmailNotVerified},
+		{"disabled", disabled, false, errAccountDisabled},
+		{"disabled wins over unverified", disabledUnverified, true, errAccountDisabled},
+	}
+	for _, c := range cases {
+		if got := loginGate(c.u, c.require); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+	if errAccountDisabled.Status != 403 || errAccountDisabled.Code != "account_disabled" {
+		t.Fatal("account_disabled must be a 403")
+	}
+}

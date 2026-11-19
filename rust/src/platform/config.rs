@@ -106,7 +106,7 @@ impl Config {
         Self::from_lookup(|name| env::var(name).ok())
     }
 
-    fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self> {
+    pub(crate) fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self> {
         let e = Env(get);
         let production = match e.or("APP_ENV", "development").as_str() {
             "production" => true,
