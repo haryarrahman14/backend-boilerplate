@@ -13,4 +13,8 @@ contract-%:
 
 contract: contract-go contract-rust contract-python contract-nestjs
 
-.PHONY: infra infra-down contract
+# sslmode behaviour of all four against a throwaway TLS-only Postgres (run `make contract` first so everything is built)
+contract-tls:
+	contract/tls.sh
+
+.PHONY: infra infra-down contract contract-tls

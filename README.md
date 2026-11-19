@@ -19,7 +19,7 @@ flowchart LR
     API -->|"presign"| S3[("R2 / S3")]
     API --> SMTP["SMTP"]
     M -.->|"file bytes"| S3
-    CT["24 contract tests"] -.->|"same suite"| API
+    CT["29 contract tests"] -.->|"same suite"| API
 ```
 
 | | |
@@ -83,9 +83,10 @@ make contract                   # repo root: the suite against all four
 
 | | |
 |---|---|
-| Contract suite | 24 black-box tests, identical for all four implementations, including concurrency races |
+| Contract suite | 29 black-box tests, identical for all four implementations, including concurrency races |
 | Security audit | one structured multi-agent review; 14 findings: 13 fixed, 1 mitigated (anonymous mail flooding is bounded, not eliminated) |
-| Test infrastructure | local Postgres, MinIO and Mailpit — not yet a real R2 bucket, TLS Postgres or TLS SMTP |
+| Database TLS | `make contract-tls`: every `sslmode` against a TLS-only Postgres with a private CA — wrong CA, missing CA and host-name mismatch are all refused |
+| Test infrastructure | local Postgres, MinIO and Mailpit — not yet a real R2 bucket or TLS SMTP |
 
 ---
 
@@ -360,7 +361,7 @@ Same names in all four.
 
 | Var | Example |
 |---|---|
-| `DATABASE_URL` | `postgres://user:pass@host:5432/db?sslmode=verify-full` |
+| `DATABASE_URL` | `postgres://user:pass@host:5432/db?sslmode=verify-full` (add `&sslrootcert=/path/ca.crt` for a private CA) |
 | `JWT_SECRET` | 32+ random characters |
 | `S3_ENDPOINT` | `https://<account_id>.r2.cloudflarestorage.com` |
 | `S3_ACCESS_KEY_ID` · `S3_SECRET_ACCESS_KEY` · `S3_BUCKET` | R2 API token and bucket |

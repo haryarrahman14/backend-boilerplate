@@ -1,6 +1,6 @@
 import { inspect } from 'node:util';
 import { parseCidrs } from '../http/client-ip.js';
-import { sslModeOf } from './database-url.js';
+import { readRootCert, sslModeOf, sslRootCertOf } from './database-url.js';
 import { plainToInstance, Transform, Type } from 'class-transformer';
 import {
   ArrayNotEmpty,
@@ -140,6 +140,8 @@ function crossFieldProblems(env: Env): string[] {
   if (typeof env.DATABASE_URL === 'string' && env.DATABASE_URL) {
     try {
       const mode = sslModeOf(env.DATABASE_URL);
+      const rootCert = sslRootCertOf(env.DATABASE_URL);
+      if (rootCert && mode !== undefined && mode !== 'disable') readRootCert(rootCert); // unreadable CA file → clear startup error
       if (production && mode === undefined) {
         problems.push('DATABASE_URL must carry an explicit sslmode in production (verify-full recommended, disable to opt out)');
       }

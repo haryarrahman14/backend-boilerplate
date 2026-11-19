@@ -64,6 +64,12 @@ describe('env validation', () => {
     expect(() => validate({ ...base, DATABASE_URL: 'postgres://u:p@db/app?sslmode=no-verify' })).toThrow(/not supported/);
   });
 
+  it('refuses to start when the sslrootcert file cannot be read', () => {
+    expect(() => validate({ ...base, DATABASE_URL: 'postgres://u:p@db/app?sslmode=verify-full&sslrootcert=/nonexistent/ca.crt' })).toThrow(
+      /sslrootcert \/nonexistent\/ca\.crt is not readable/,
+    );
+  });
+
   it('requires https APP_URL and S3_ENDPOINT in production', () => {
     expect(() => validate({ ...production, APP_URL: 'http://app.example.com' })).toThrow(/APP_URL must be https/);
     expect(() => validate({ ...production, S3_ENDPOINT: 'http://minio:9000' })).toThrow(/S3_ENDPOINT must be https/);
