@@ -327,55 +327,7 @@ Promote: `UPDATE auth.users SET role='admin' WHERE email='…'`
 
 ## Database
 
-```mermaid
-erDiagram
-    users ||--o{ sessions : has
-    users ||--o{ user_tokens : has
-    users ||--o{ files : owns
-
-    users {
-        uuid id PK
-        text email UK
-        text password_hash
-        text name
-        text role
-        timestamptz email_verified_at
-        timestamptz created_at
-        timestamptz updated_at
-    }
-    sessions {
-        uuid id PK
-        uuid user_id FK
-        text refresh_token_hash
-        text previous_refresh_token_hash
-        text user_agent
-        text ip
-        timestamptz created_at
-        timestamptz last_used_at
-        timestamptz expires_at
-        timestamptz revoked_at
-    }
-    user_tokens {
-        uuid id PK
-        uuid user_id FK
-        text type
-        text token_hash UK
-        timestamptz expires_at
-        timestamptz used_at
-        timestamptz created_at
-    }
-    files {
-        uuid id PK
-        uuid user_id FK
-        text key UK
-        text filename
-        text content_type
-        bigint size
-        text status
-        timestamptz created_at
-        timestamptz uploaded_at
-    }
-```
+<img src="docs/erd.svg" alt="ERD: auth.users has many auth.sessions, auth.user_tokens and storage.files" width="980">
 
 | Schema | Tables | Migrations |
 |---|---|---|
