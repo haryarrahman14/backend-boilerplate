@@ -1,0 +1,33 @@
+# Local infra shared by all four services: Postgres, MinIO (stands in for R2), Mailpit (catches email).
+# Development only: default credentials, so every port is bound to 127.0.0.1 and never to the LAN.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports: ["127.0.0.1:5433:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      retries: 20
+
+  minio:
+    image: cgr.dev/chainguard/minio  # minio/minio is no longer published on Docker Hub
+    user: root
+    # a directory under /data is a bucket, so no init container is needed
+    entrypoint: sh -c "mkdir -p /data/boilerplate && minio server /data --console-address :9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
+
+  mailpit:
+    image: axllent/mailpit
+    ports: ["127.0.0.1:1025:1025", "127.0.0.1:8025:8025"]
+
+volumes:
+  pgdata:
